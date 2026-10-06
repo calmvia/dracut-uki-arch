@@ -1,0 +1,32 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+# Kernels: tells the script which kernel version changed
+Target = usr/lib/modules/*/pkgbase
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = dracut
+Target = systemd
+Target = systemd-ukify
+Target = amd-ucode
+Target = intel-ucode
+Target = linux-firmware
+Target = grub
+Target = cryptsetup
+Target = lvm2
+Target = tpm2-tools
+Target = f2fs-tools
+Target = xfsprogs
+Target = btrfs-progs
+Target = e2fsprogs
+Target = dosfstools
+
+[Action]
+Description = Building UKIs and regenerating the GRUB menu...
+When = PostTransaction
+Exec = /usr/local/bin/uki-build
+NeedsTargets
