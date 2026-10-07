@@ -112,7 +112,7 @@ for d in "${DIRS[@]}"; do
                 chmod "$mode" "$dst"
             fi
         elif [[ "$rel" == etc/* && "$force" == false ]]; then
-            log_warning "exists    /${rel} differs -> wrote /${rel}.new (merge it by hand)"
+            log_warning "existing    /${rel} differs -> wrote /${rel}.new (merge it by hand)"
             install_file "$src" "${dst}.new" "$mode"
             n_pending=$((n_pending + 1))
         else
