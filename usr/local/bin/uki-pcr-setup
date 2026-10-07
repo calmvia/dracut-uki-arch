@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # uki-pcr-setup.sh - prepare PCR signing for uki-build.sh
 #
-#  1. Creates /etc/kernel/cmdline
+#  1. Creates /etc/kernel/cmdline and /etc/dracut.conf.d/cmdline.conf
 #       from the arguments, else from stdin, else from /proc/cmdline
 #       (BOOT_IMAGE= and initrd= removed).
 #  2. Creates the PCR signing key pair (RSA 2048) in the locations used by
@@ -15,7 +15,8 @@ set -Eeuo pipefail
 
 CONFIG_FILE="/etc/kernel-setup.conf"
 CMDLINE_FILE="/etc/kernel/cmdline"
-DRACUT_CMDLINE_FILE="/etc/dracut.conf.d/cmdline.conf"
+DRACUT_CMDLINE_CONF="/etc/dracut.conf.d/cmdline.conf"
+DRACUT_CONF="/etc/dracut.conf.d/cmdline.conf"
 
 force_cmdline=false
 force_keys=false
@@ -33,7 +34,7 @@ usage() {
 Usage: ${0##*/} [options] [kernel command line...]
 
 Options:
-  --force-cmdline   overwrite an existing ${CMDLINE_FILE} (a .bak copy is kept)
+  --force-cmdline   overwrite existing ${CMDLINE_FILE} and ${DRACUT_CONF} (.bak copies kept)
   --force-keys      regenerate existing PCR keys (old ones are backed up).
                     This invalidates TPM2 slots enrolled against the old key!
   -y, --yes         do not ask for confirmation
@@ -99,66 +100,113 @@ fi
 # ---------------------------------------------------------------------------
 # 1. Kernel command line
 # ---------------------------------------------------------------------------
-setup_cmdline() {
-    local cmdline="" source="" stamp
-    local cmdline_file_present=false
+# Write /etc/dracut.conf.d/cmdline.conf (kernel_cmdline="...") for dracut --uefi.
+# The file is sourced by dracut, so $ ` " and \ are escaped.
+write_dracut_conf() {
+    local cmdline="$1" escaped stamp
 
-    if [[ -e "$CMDLINE_FILE" && -e "$DRACUT_CMDLINE_FILE"  && "$force_cmdline" == false ]]; then
-        log_info "${CMDLINE_FILE} already exists, keeping it (use --force-cmdline to replace)"
-        return 0
+    escaped="${cmdline//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    escaped="${escaped//\$/\\\$}"
+    escaped="${escaped//\`/\\\`}"
+
+    mkdir -p "$(dirname "$DRACUT_CONF")"
+    if [[ -e "$DRACUT_CONF" ]]; then
+        stamp=$(date +%Y%m%d-%H%M%S)
+        cp -a -- "$DRACUT_CONF" "${DRACUT_CONF}.bak.${stamp}"
+        log_info "Backed up existing file to ${DRACUT_CONF}.bak.${stamp}"
     fi
 
-    if [[ "${#cmdline_args[@]}" -gt 0 ]]; then
-        cmdline=$(normalize "${cmdline_args[*]}")
-        source="arguments"
-    elif [[ ! -t 0 ]]; then
-        cmdline=$(normalize "$(cat || true)")
-        source="stdin"
+    printf 'kernel_cmdline="%s"\n' "$escaped" > "$DRACUT_CONF"
+    chmod 644 "$DRACUT_CONF"
+    log_info "Wrote ${DRACUT_CONF}"
+}
+
+# Escape a string for use inside double quotes in a shell-sourced dracut conf
+dq_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//\$/\\\$}"
+    s="${s//\`/\\\`}"
+    printf '%s' "$s"
+}
+
+# write_file <path> <content>: write the file (0644), backing up an existing one
+write_file() {
+    local path="$1" content="$2" stamp
+
+    mkdir -p "$(dirname "$path")"
+    if [[ -e "$path" ]]; then
+        stamp=$(date +%Y%m%d-%H%M%S)
+        cp -a -- "$path" "${path}.bak.${stamp}"
+        log_info "Backed up existing file to ${path}.bak.${stamp}"
+    fi
+
+    printf '%s\n' "$content" > "$path"
+    chmod 644 "$path"
+}
+
+setup_cmdline() {
+    local cmdline="" source="" written=false
+
+    if [[ -e "$CMDLINE_FILE" && "$force_cmdline" == false ]]; then
+        cmdline=$(normalize "$(cat "$CMDLINE_FILE")")
+        log_info "${CMDLINE_FILE} already exists, keeping it (use --force-cmdline to replace)"
+    else
+        if [[ "${#cmdline_args[@]}" -gt 0 ]]; then
+            cmdline=$(normalize "${cmdline_args[*]}")
+            source="arguments"
+        elif [[ ! -t 0 ]]; then
+            cmdline=$(normalize "$(cat || true)")
+            source="stdin"
+        fi
+
+        if [[ -z "$cmdline" ]]; then
+            local raw word kept=()
+            local words=()
+            if [[ ! -r /proc/cmdline ]]; then
+                log_error "No command line given and /proc/cmdline is unreadable"
+                return 1
+            fi
+            read -r raw < /proc/cmdline || true
+            read -ra words <<< "$raw" || true
+            for word in "${words[@]}"; do
+                case "$word" in
+                    BOOT_IMAGE=*|initrd=*) continue ;;
+                esac
+                kept+=("$word")
+            done
+            cmdline=$(normalize "${kept[*]:-}")
+            source="/proc/cmdline"
+
+            if [[ -z "$cmdline" ]]; then
+                log_error "Nothing usable left in /proc/cmdline; pass the command line as arguments"
+                return 1
+            fi
+            log_warning "Using /proc/cmdline of the CURRENT boot. One-off parameters (rescue options, a different root=) would be baked in. Review ${CMDLINE_FILE}."
+        fi
+
+        write_file "$CMDLINE_FILE" "$cmdline"
+        written=true
+        log_info "Wrote ${CMDLINE_FILE} (from ${source}):"
+        echo "    ${cmdline}"
     fi
 
     if [[ -z "$cmdline" ]]; then
-        local raw word kept=()
-        local words=()
-        if [[ ! -r /proc/cmdline ]]; then
-            log_error "No command line given and /proc/cmdline is unreadable"
-            return 1
-        fi
-        read -r raw < /proc/cmdline || true
-        read -ra words <<< "$raw" || true
-        for word in "${words[@]}"; do
-            case "$word" in
-                BOOT_IMAGE=*|initrd=*) continue ;;
-            esac
-            kept+=("$word")
-        done
-        cmdline=$(normalize "${kept[*]:-}")
-        source="/proc/cmdline"
-
-        if [[ -z "$cmdline" ]]; then
-            log_error "Nothing usable left in /proc/cmdline; pass the command line as arguments"
-            return 1
-        fi
-        log_warning "Using /proc/cmdline of the CURRENT boot. One-off parameters (rescue options, a different root=) would be baked in. Review ${CMDLINE_FILE}."
+        log_warning "${CMDLINE_FILE} is empty; not creating ${DRACUT_CMDLINE_CONF}"
+        return 0
     fi
 
-    mkdir -p "$(dirname "$CMDLINE_FILE")"
-    mkdir -p "$(dirname "$DRACUT_CMDLINE_FILE")"
-
-    stamp=$(date +%Y%m%d-%H%M%S)
-    if [[ -e "$CMDLINE_FILE" ]]; then
-        cp -a -- "$CMDLINE_FILE" "${CMDLINE_FILE}.bak.${stamp}"
-        log_info "Backed up existing file to ${CMDLINE_FILE}.bak.${stamp}"
-    fi
-    if [[ -e "$DRACUT_CMDLINE_FILE" ]]; then
-        cp -a -- "$DRACUT_CMDLINE_FILE" "${DRACUT_CMDLINE_FILE}.bak.${stamp}"
-        log_info "Backed up existing file to ${CMDLINE_FILE}.bak.${stamp}"
+    # dracut: kernel_cmdline is embedded as the .cmdline of UKIs built with --uefi
+    if [[ -e "$DRACUT_CMDLINE_CONF" && "$written" == false ]]; then
+        log_info "${DRACUT_CMDLINE_CONF} already exists, keeping it (use --force-cmdline to replace)"
+        return 0
     fi
 
-    printf '%s\n' "$cmdline" > "$CMDLINE_FILE"
-    printf 'kernel_cmdline="%s"\n' "$cmdline" > "$DRACUT_CMDLINE_FILE"
-    chmod 644 "$CMDLINE_FILE" "$DRACUT_CMDLINE_FILE"
-    log_info "Wrote ${CMDLINE_FILE} (from ${source}):"
-    echo "    ${cmdline}"
+    write_file "$DRACUT_CMDLINE_CONF" "# Generated by uki-pcr-setup.sh from ${CMDLINE_FILE}
+kernel_cmdline=\"$(dq_escape "$cmdline")\""
+    log_info "Wrote ${DRACUT_CMDLINE_CONF}"
 }
 
 # ---------------------------------------------------------------------------
@@ -206,9 +254,7 @@ setup_keys() {
 
     (
         umask 077
-        ukify genkey \
-        --pcr-private-key=/etc/systemd/tpm2-pcr-private-key.pem \
-        --pcr-public-key=/etc/systemd/tpm2-pcr-public-key.pem
+        ukify genkey --pcr-private-key="$priv" --pcr-public-key="$pub"
     )
     chown root:root "$priv" "$pub"
     chmod 600 "$priv"

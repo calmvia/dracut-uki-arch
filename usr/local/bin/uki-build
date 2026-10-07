@@ -400,6 +400,11 @@ if [[ -n "$extra_patterns" ]]; then
     done
 fi
 
+# GRUB menu regeneration (default: on, as before the option existed)
+update_grub=true
+if ! conf_bool uki.grub_mkconfig true; then update_grub=false; fi
+grub_cfg="${conf[uki.grub_cfg]:-/boot/grub/grub.cfg}"
+
 # ---------------------------------------------------------------------------
 # Work out what to build
 # ---------------------------------------------------------------------------
@@ -474,10 +479,15 @@ for pkgbase in "${!to_build[@]}"; do
     uki_build "$pkgbase" "${to_build[$pkgbase]}"
 done
 
-# Update grub.cfg
-if [[ "${#built[@]}" -gt 0 ]]; then
-    echo "==> Regenerating GRUB menu..."
-    if ! grub-mkconfig -o /boot/grub/grub.cfg </dev/null 2>&1 | sed 's/^/\t/'; then
+# Update grub.cfg (the UKI menu entries come from /etc/grub.d/11_uki)
+if [[ "$update_grub" == false ]]; then
+    echo "==> GRUB menu regeneration disabled (grub_mkconfig = false)"
+    if [[ "${#built[@]}" -le 0 ]]; then
+        echo "==> No kernel image rebuilding is required."
+    fi
+elif [[ "${#built[@]}" -gt 0 ]]; then
+    echo "==> Regenerating GRUB menu (${grub_cfg})..."
+    if ! grub-mkconfig -o "$grub_cfg" </dev/null 2>&1 | sed 's/^/\t/'; then
         log_error "grub-mkconfig failed"
         failed+=("grub-mkconfig")
     fi
